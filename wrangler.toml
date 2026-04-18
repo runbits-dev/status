@@ -1,0 +1,15 @@
+name = "runbits-status"
+main = "src/index.ts"
+compatibility_date = "2024-12-30"
+routes = [{ pattern = "status.runbits.dev", custom_domain = true }]
+
+[[kv_namespaces]]
+binding = "KV"
+id = "6b1ab19c37814471843cc8709f0287bc"
+
+# Cron trigger: check every 5 minutes
+[triggers]
+crons = ["*/5 * * * *"]
+
+[vars]
+ENVIRONMENT = "production"
