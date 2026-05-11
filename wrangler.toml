@@ -13,3 +13,6 @@ crons = ["*/5 * * * *"]
 
 [vars]
 ENVIRONMENT = "production"
+
+# Secrets (set via: wrangler secret put RESEND_API_KEY)
+# RESEND_API_KEY — Resend API key for alert emails (from resend.com)
