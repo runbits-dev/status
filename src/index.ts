@@ -48,12 +48,13 @@ const SERVICES = [
   { id: "whatsapp", name: "WhatsApp Bot", url: "https://api.runbits.dev/health/svc/whatsapp" },
   // Added 2026-05: channels (omnichannel inbox), runtics (AI agent), and
   // catalog/sales aliases that the gateway resolves to RESTAURANT_SERVICE
-  // and SALES_AGENT bindings respectively. Email-marketing has no gateway
-  // service binding yet, so it stays excluded.
+  // and SALES_AGENT bindings respectively. Email-marketing wired via
+  // MARKETING_SERVICE binding on the gateway.
   { id: "channels", name: "Channels (omnichannel)", url: "https://api.runbits.dev/health/svc/channels" },
   { id: "runtics", name: "Runtics (AI Agent)", url: "https://api.runbits.dev/health/svc/runtics" },
   { id: "sales", name: "Sales Agent (AI)", url: "https://api.runbits.dev/health/svc/sales" },
   { id: "catalog", name: "Catalog Service", url: "https://api.runbits.dev/health/svc/catalog" },
+  { id: "marketing", name: "Email Marketing", url: "https://api.runbits.dev/health/svc/marketing" },
 ];
 
 type CheckResult = {
