@@ -7,7 +7,10 @@ routes = [{ pattern = "status.runbits.dev", custom_domain = true }]
 binding = "KV"
 id = "6b1ab19c37814471843cc8709f0287bc"
 
-# Cron trigger: check every 5 minutes
+# Cron trigger: declared as every 5 min — the handler internally honors the
+# `monitoring:config` KV value (interval_minutes 5/10/15/30) and skips ticks
+# that don't align. This way the cron cadence can be changed at runtime from
+# the admin UI without redeploying.
 [triggers]
 crons = ["*/5 * * * *"]
 
@@ -16,3 +19,7 @@ ENVIRONMENT = "production"
 
 # Secrets (set via: wrangler secret put RESEND_API_KEY)
 # RESEND_API_KEY — Resend API key for alert emails (from resend.com)
+# STATUS_INTERNAL_SECRET — shared secret used by runbits-gateway when proxying
+#   /api/monitoring/* requests here. MUST match the same secret name on the
+#   gateway worker. Without it the worker rejects monitoring/config requests
+#   (503). Set via: wrangler secret put STATUS_INTERNAL_SECRET

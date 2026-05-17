@@ -2,6 +2,13 @@
   "name": "runbits-status",
   "private": true,
   "version": "1.0.0",
-  "scripts": { "dev": "wrangler dev", "deploy": "wrangler deploy" },
-  "devDependencies": { "wrangler": "^3.80.0" }
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260517.1",
+    "typescript": "^6.0.3",
+    "wrangler": "^3.80.0"
+  }
 }

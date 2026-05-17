@@ -25,6 +25,173 @@ interface Env {
   KV: KVNamespace;
   ENVIRONMENT: string;
   RESEND_API_KEY: string;
+  // Shared secret used by the gateway to authenticate proxied admin requests
+  // (`/api/monitoring/config`). Set via `wrangler secret put STATUS_INTERNAL_SECRET`
+  // on BOTH the gateway and this worker — values must match. The gateway sends
+  // it in the `X-Internal-Secret` header; this worker rejects requests missing
+  // or with a mismatched value.
+  STATUS_INTERNAL_SECRET?: string;
+}
+
+// ─── Monitoring config (KV-backed runtime config) ────────────────────────────
+//
+// Stored at KV key `monitoring:config`. Single source of truth for cron
+// interval, alert thresholds, and notification channels. Read on every
+// scheduled tick (cheap — single KV read) and on every config API request.
+// Mutated only through PUT /api/monitoring/config (admin-only, gated via the
+// gateway service binding).
+
+const MONITORING_CONFIG_KEY = "monitoring:config";
+
+type MonitoringConfig = {
+  version: number;
+  status_cron: {
+    interval_minutes: number; // valid: 5, 10, 15, 30
+    enabled: boolean;
+  };
+  thresholds: {
+    error_rate_pct: number;
+    error_rate_window_minutes: number;
+    cost_daily_usd: number;
+    latency_p95_ms: number;
+  };
+  channels: {
+    email: { enabled: boolean; address: string };
+    whatsapp: { enabled: boolean; phone: string };
+    push: { enabled: boolean };
+  };
+  updated_at: number;
+  updated_by: string;
+};
+
+const VALID_INTERVALS = [5, 10, 15, 30] as const;
+type ValidInterval = typeof VALID_INTERVALS[number];
+
+const DEFAULT_MONITORING_CONFIG: MonitoringConfig = {
+  version: 1,
+  status_cron: { interval_minutes: 5, enabled: true },
+  thresholds: {
+    error_rate_pct: 1.0,
+    error_rate_window_minutes: 10,
+    cost_daily_usd: 5.0,
+    latency_p95_ms: 2000,
+  },
+  channels: {
+    email: { enabled: true, address: "lucas.i.carrizo@gmail.com" },
+    whatsapp: { enabled: false, phone: "" },
+    push: { enabled: true },
+  },
+  updated_at: 0,
+  updated_by: "",
+};
+
+async function getMonitoringConfig(env: Env): Promise<MonitoringConfig> {
+  try {
+    const raw = await env.KV.get<MonitoringConfig>(MONITORING_CONFIG_KEY, "json");
+    if (!raw || typeof raw !== "object") return DEFAULT_MONITORING_CONFIG;
+    // Shallow merge defaults so newly-added fields don't break a stored
+    // older config blob.
+    return {
+      version: raw.version ?? DEFAULT_MONITORING_CONFIG.version,
+      status_cron: { ...DEFAULT_MONITORING_CONFIG.status_cron, ...(raw.status_cron ?? {}) },
+      thresholds: { ...DEFAULT_MONITORING_CONFIG.thresholds, ...(raw.thresholds ?? {}) },
+      channels: {
+        email: { ...DEFAULT_MONITORING_CONFIG.channels.email, ...(raw.channels?.email ?? {}) },
+        whatsapp: { ...DEFAULT_MONITORING_CONFIG.channels.whatsapp, ...(raw.channels?.whatsapp ?? {}) },
+        push: { ...DEFAULT_MONITORING_CONFIG.channels.push, ...(raw.channels?.push ?? {}) },
+      },
+      updated_at: raw.updated_at ?? 0,
+      updated_by: raw.updated_by ?? "",
+    };
+  } catch {
+    return DEFAULT_MONITORING_CONFIG;
+  }
+}
+
+type ConfigUpdateError = { ok: false; error: string };
+type ConfigUpdateOk = { ok: true; config: MonitoringConfig };
+
+function validateMonitoringConfig(input: unknown): ConfigUpdateError | { ok: true; sanitized: MonitoringConfig } {
+  if (!input || typeof input !== "object") {
+    return { ok: false, error: "Body must be a JSON object" };
+  }
+  const i = input as Partial<MonitoringConfig>;
+
+  const sc = i.status_cron ?? DEFAULT_MONITORING_CONFIG.status_cron;
+  const interval = Number(sc.interval_minutes);
+  if (!VALID_INTERVALS.includes(interval as ValidInterval)) {
+    return { ok: false, error: `status_cron.interval_minutes must be one of ${VALID_INTERVALS.join(", ")}` };
+  }
+  if (typeof sc.enabled !== "boolean") {
+    return { ok: false, error: "status_cron.enabled must be a boolean" };
+  }
+
+  const th = i.thresholds ?? DEFAULT_MONITORING_CONFIG.thresholds;
+  const errRate = Number(th.error_rate_pct);
+  const errWin = Number(th.error_rate_window_minutes);
+  const costCap = Number(th.cost_daily_usd);
+  const lat = Number(th.latency_p95_ms);
+  if (!Number.isFinite(errRate) || errRate < 0 || errRate > 100) {
+    return { ok: false, error: "thresholds.error_rate_pct must be a number between 0 and 100" };
+  }
+  if (!Number.isFinite(errWin) || errWin < 1 || errWin > 1440) {
+    return { ok: false, error: "thresholds.error_rate_window_minutes must be a number between 1 and 1440" };
+  }
+  if (!Number.isFinite(costCap) || costCap < 0) {
+    return { ok: false, error: "thresholds.cost_daily_usd must be a positive number" };
+  }
+  if (!Number.isFinite(lat) || lat < 1) {
+    return { ok: false, error: "thresholds.latency_p95_ms must be a positive number" };
+  }
+
+  const ch = i.channels ?? DEFAULT_MONITORING_CONFIG.channels;
+  const email = { ...DEFAULT_MONITORING_CONFIG.channels.email, ...(ch.email ?? {}) };
+  const whatsapp = { ...DEFAULT_MONITORING_CONFIG.channels.whatsapp, ...(ch.whatsapp ?? {}) };
+  const push = { ...DEFAULT_MONITORING_CONFIG.channels.push, ...(ch.push ?? {}) };
+
+  if (typeof email.enabled !== "boolean") {
+    return { ok: false, error: "channels.email.enabled must be a boolean" };
+  }
+  if (email.enabled && (!email.address || typeof email.address !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.address))) {
+    return { ok: false, error: "channels.email.address must be a valid email when enabled" };
+  }
+  if (typeof whatsapp.enabled !== "boolean") {
+    return { ok: false, error: "channels.whatsapp.enabled must be a boolean" };
+  }
+  if (whatsapp.enabled && (!whatsapp.phone || !/^\+[1-9]\d{6,14}$/.test(whatsapp.phone))) {
+    return { ok: false, error: "channels.whatsapp.phone must be E.164 format (+<digits>) when enabled" };
+  }
+  if (typeof push.enabled !== "boolean") {
+    return { ok: false, error: "channels.push.enabled must be a boolean" };
+  }
+
+  const sanitized: MonitoringConfig = {
+    version: 1,
+    status_cron: {
+      interval_minutes: interval as ValidInterval,
+      enabled: sc.enabled,
+    },
+    thresholds: {
+      error_rate_pct: errRate,
+      error_rate_window_minutes: errWin,
+      cost_daily_usd: costCap,
+      latency_p95_ms: lat,
+    },
+    channels: {
+      email: { enabled: email.enabled, address: email.address ?? "" },
+      whatsapp: { enabled: whatsapp.enabled, phone: whatsapp.phone ?? "" },
+      push: { enabled: push.enabled },
+    },
+    updated_at: Date.now(),
+    updated_by: "",
+  };
+
+  return { ok: true, sanitized };
+}
+
+async function saveMonitoringConfig(env: Env, cfg: MonitoringConfig): Promise<ConfigUpdateOk> {
+  await env.KV.put(MONITORING_CONFIG_KEY, JSON.stringify(cfg));
+  return { ok: true, config: cfg };
 }
 
 const SERVICES = [
@@ -589,9 +756,104 @@ async function runQASmokeForced(env: Env): Promise<void> {
 
 // ─── Worker exports ──────────────────────────────────────────────────────────
 
+// ─── Internal auth helper for /api/monitoring/* ──────────────────────────────
+//
+// The status worker is intentionally public at status.runbits.dev (renders the
+// public status page). The monitoring/config endpoints below MUST NOT be
+// reachable publicly — they're proxied here by runbits-gateway via service
+// binding after the gateway has already validated JWT + admin role.
+//
+// We defend in depth: even though the binding is internal, callers must
+// present a matching INTERNAL_GATEWAY_SECRET so a misconfigured public route
+// or a stolen URL can't mutate config. Returns null if auth passes, or a
+// Response if it should be rejected.
+
+function rejectIfNotInternal(req: Request, env: Env): Response | null {
+  const provided = req.headers.get("X-Internal-Secret");
+  const expected = env.STATUS_INTERNAL_SECRET;
+  if (!expected) {
+    return new Response(
+      JSON.stringify({ error: "Service not configured (missing STATUS_INTERNAL_SECRET)" }),
+      { status: 503, headers: { "Content-Type": "application/json" } },
+    );
+  }
+  if (!provided || provided !== expected) {
+    return new Response(
+      JSON.stringify({ error: "Unauthorized" }),
+      { status: 401, headers: { "Content-Type": "application/json" } },
+    );
+  }
+  return null;
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    // ── Internal monitoring config endpoints (proxied by gateway) ───────────
+    if (url.pathname === "/api/monitoring/config") {
+      const reject = rejectIfNotInternal(request, env);
+      if (reject) return reject;
+
+      if (request.method === "GET") {
+        const cfg = await getMonitoringConfig(env);
+        return new Response(JSON.stringify({ config: cfg }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      if (request.method === "PUT") {
+        let body: unknown;
+        try {
+          body = await request.json();
+        } catch {
+          return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
+            status: 400,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        const validation = validateMonitoringConfig(body);
+        if (!validation.ok) {
+          return new Response(JSON.stringify({ error: validation.error }), {
+            status: 400,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        // Stamp updated_by from header forwarded by the gateway (which read it
+        // from the JWT's email/sub claim — see gateway proxy logic).
+        const updatedBy = request.headers.get("X-User-Email") || request.headers.get("X-User-Id") || "";
+        const cfg: MonitoringConfig = { ...validation.sanitized, updated_by: updatedBy };
+        const saved = await saveMonitoringConfig(env, cfg);
+        return new Response(JSON.stringify(saved), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      return new Response(JSON.stringify({ error: "Method not allowed" }), {
+        status: 405,
+        headers: { "Content-Type": "application/json", "Allow": "GET, PUT" },
+      });
+    }
+
+    // Public health snapshot — returns current live check (one-shot, no KV
+    // write). Safe to expose: same data the public status page renders.
+    if (request.method === "GET" && url.pathname === "/api/monitoring/health-snapshot") {
+      const check = await checkAll();
+      const services = SERVICES.map((svc) => {
+        const r = check.services[svc.id];
+        return {
+          id: svc.id,
+          name: svc.name,
+          ok: !!r?.ok,
+          status: r?.status ?? 0,
+          latency_ms: r?.latency ?? 0,
+        };
+      });
+      return new Response(
+        JSON.stringify({ ts: check.ts, services }),
+        { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } },
+      );
+    }
 
     // Manual QA trigger endpoint
     if (request.method === "POST" && url.pathname === "/qa/run") {
@@ -617,12 +879,28 @@ export default {
     });
   },
 
-  async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
+  async scheduled(event: ScheduledEvent, env: Env): Promise<void> {
+    // Read runtime config — controls whether checks run and at what cadence.
+    // The cron itself fires every 5 min (declared in wrangler.toml), but the
+    // handler decides whether THIS tick should actually execute the checks.
+    const config = await getMonitoringConfig(env);
+
+    // QA smoke is independent of the status_cron toggle — it has its own
+    // weekly schedule guard inside runQASmoke().
+    await runQASmoke(env);
+
+    if (!config.status_cron.enabled) return;
+
+    // Skip ticks that don't align with the selected interval. eg interval=15
+    // means only run when minute is 0, 15, 30, 45. We use UTC minutes from
+    // the scheduled time (deterministic across worker invocations).
+    const minute = new Date(event.scheduledTime).getUTCMinutes();
+    if (minute % config.status_cron.interval_minutes !== 0) return;
+
     const check = await checkAll();
     await Promise.all([
       storeCheck(env.KV, check),
       runMonitoringAgent(env, check),
     ]);
-    await runQASmoke(env);
   },
 };
