@@ -21,6 +21,8 @@
  * - Logs incidents to KV with 30-day retention
  */
 
+interface ServiceBindingLike { fetch: (req: Request) => Promise<Response> }
+
 interface Env {
   KV: KVNamespace;
   ENVIRONMENT: string;
@@ -31,6 +33,15 @@ interface Env {
   // it in the `X-Internal-Secret` header; this worker rejects requests missing
   // or with a mismatched value.
   STATUS_INTERNAL_SECRET?: string;
+  // Service binding to runtics-control. Used by the self-alert wiring: when a
+  // service transitions up→down or down→up we POST to
+  // /internal/alert-from-status with HMAC so the alert lands in
+  // monitoring_alerts and channels fan out via the runtics dispatcher.
+  // Optional — when missing, the legacy email path remains the only channel.
+  RUNTICS_CONTROL?: ServiceBindingLike;
+  // Same secret as runtics-control's INTERNAL_SERVICE_SECRET. We use it to
+  // HMAC-sign the self-alert call from this worker. Bound from Secrets Store.
+  INTERNAL_SERVICE_SECRET?: { get: () => Promise<string> };
 }
 
 // ─── Monitoring config (KV-backed runtime config) ────────────────────────────
@@ -373,6 +384,71 @@ async function sendRecoveryEmail(
   }).catch((err) => console.error("[monitoring] Recovery email failed:", err));
 }
 
+// ─── Self-alert to runtics-control (HMAC-signed S2S) ────────────────────────
+//
+// Push transitions (up→down, down→up) into the runtics monitoring pipeline so
+// the alert lands in monitoring_alerts, fans out to channels per the runtime
+// config, and triggers the monitoring agent's context_analysis mode.
+//
+// HMAC signature mirrors runtics-control/src/service-auth.ts:
+//   signature = HMAC-SHA256(secret, `${ts}.${caller}.${path}.${bodyHash}`)
+//
+// Failure is non-fatal — the legacy email path keeps working even if the
+// runtics-control call fails.
+
+const ENC = new TextEncoder();
+
+function bufToHexStr(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, "0");
+  return out;
+}
+
+async function sha256HexStr(s: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", ENC.encode(s));
+  return bufToHexStr(buf);
+}
+
+async function sendSelfAlertToRuntics(
+  env: Env,
+  payload: { service: string; type: "service_down" | "service_recovered"; message: string; http_status?: number; latency_ms?: number },
+): Promise<void> {
+  if (!env.RUNTICS_CONTROL || !env.INTERNAL_SERVICE_SECRET) return;
+  try {
+    const secret = await env.INTERNAL_SERVICE_SECRET.get();
+    if (!secret) return;
+    const url = "https://internal/internal/alert-from-status";
+    const body = JSON.stringify(payload);
+    const ts = String(Math.floor(Date.now() / 1000));
+    const path = "/internal/alert-from-status";
+    const bodyHash = await sha256HexStr(body);
+    const message = `${ts}.runbits-status.${path}.${bodyHash}`;
+    const key = await crypto.subtle.importKey(
+      "raw",
+      ENC.encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const sigBuf = await crypto.subtle.sign("HMAC", key, ENC.encode(message));
+    const headers = new Headers({
+      "Content-Type": "application/json",
+      "X-Service-Caller": "runbits-status",
+      "X-Service-Ts": ts,
+      "X-Service-Signature": bufToHexStr(sigBuf),
+    });
+    const res = await env.RUNTICS_CONTROL.fetch(
+      new Request(url, { method: "POST", headers, body }),
+    );
+    if (!res.ok) {
+      console.error(`[monitoring] self-alert to runtics returned ${res.status}`);
+    }
+  } catch (err) {
+    console.error("[monitoring] self-alert to runtics failed:", err);
+  }
+}
+
 // ─── Monitoring agent ────────────────────────────────────────────────────────
 
 async function runMonitoringAgent(env: Env, check: CheckResult): Promise<void> {
@@ -395,6 +471,12 @@ async function runMonitoringAgent(env: Env, check: CheckResult): Promise<void> {
       await Promise.all([
         sendRecoveryEmail(env.RESEND_API_KEY, svc.name),
         env.KV.delete(alertKey),
+        sendSelfAlertToRuntics(env, {
+          service: svc.id,
+          type: "service_recovered",
+          message: `${svc.name} is back online.`,
+          latency_ms: check.services[svc.id]?.latency,
+        }),
       ]);
     }
   }
@@ -434,6 +516,17 @@ async function runMonitoringAgent(env: Env, check: CheckResult): Promise<void> {
         `[monitoring] Alerting for ${newlyFailed.length} newly-failed service(s): ${newlyFailed.map((s) => s.name).join(", ")}`
       );
       await sendAlertEmail(env.RESEND_API_KEY, newlyFailed);
+      // Also push each transition into runtics so they land in monitoring_alerts.
+      await Promise.all(
+        newlyFailed.map((svc) =>
+          sendSelfAlertToRuntics(env, {
+            service: svc.id,
+            type: "service_down",
+            message: `${svc.name} is down (HTTP ${svc.status || "unreachable"}).`,
+            http_status: svc.status,
+          }),
+        ),
+      );
     } else {
       console.log(
         `[monitoring] ${failed.length} service(s) still down, alert already sent (within 30 min window)`

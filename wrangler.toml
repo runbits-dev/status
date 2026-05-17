@@ -14,6 +14,21 @@ id = "6b1ab19c37814471843cc8709f0287bc"
 [triggers]
 crons = ["*/5 * * * *"]
 
+# Service binding to runtics-control. Used by the self-alert wiring — when a
+# health check detects a service flipping up→down or down→up we POST to
+# /internal/alert-from-status (HMAC) so the runtics monitoring pipeline kicks
+# in (channels dispatch + monitoring agent context analysis).
+[[services]]
+binding = "RUNTICS_CONTROL"
+service = "runtics-control"
+
+# Same Secrets Store secret runtics-control / runtics-agents-runtime use.
+# Required for the HMAC-signed self-alert call to /internal/alert-from-status.
+[[secrets_store_secrets]]
+binding = "INTERNAL_SERVICE_SECRET"
+store_id = "3b9c560aecb340baae724dd4eec0307d"
+secret_name = "INTERNAL_SERVICE_SECRET"
+
 [vars]
 ENVIRONMENT = "production"
 
@@ -23,3 +38,6 @@ ENVIRONMENT = "production"
 #   /api/monitoring/* requests here. MUST match the same secret name on the
 #   gateway worker. Without it the worker rejects monitoring/config requests
 #   (503). Set via: wrangler secret put STATUS_INTERNAL_SECRET
+# INTERNAL_SERVICE_SECRET — same secret runtics-control uses to verify S2S
+#   HMAC. Required for the self-alert path. Set via:
+#   wrangler secret put INTERNAL_SERVICE_SECRET
