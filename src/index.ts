@@ -57,7 +57,7 @@ const MONITORING_CONFIG_KEY = "monitoring:config";
 type MonitoringConfig = {
   version: number;
   status_cron: {
-    interval_minutes: number; // valid: 5, 10, 15, 30
+    interval_minutes: number; // valid: 5, 10, 15, 30, 60
     enabled: boolean;
   };
   thresholds: {
@@ -75,7 +75,7 @@ type MonitoringConfig = {
   updated_by: string;
 };
 
-const VALID_INTERVALS = [5, 10, 15, 30] as const;
+const VALID_INTERVALS = [5, 10, 15, 30, 60] as const;
 type ValidInterval = typeof VALID_INTERVALS[number];
 
 const DEFAULT_MONITORING_CONFIG: MonitoringConfig = {
