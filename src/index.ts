@@ -930,6 +930,24 @@ export default {
 
     // Public health snapshot — returns current live check (one-shot, no KV
     // write). Safe to expose: same data the public status page renders.
+    //
+    // CORS allow-list: runbits.io (merchant dashboard 'Refresh now' button
+    // calls this directly to avoid the gateway → status binding → checkAll →
+    // 17 fetches back to gateway loop that causes 522 timeouts in cascade.
+    if (request.method === "OPTIONS" && url.pathname === "/api/monitoring/health-snapshot") {
+      const origin = request.headers.get("Origin") || "";
+      const allowed = ["https://runbits.io", "https://runbits.app", "http://localhost:3000"];
+      const allowOrigin = allowed.includes(origin) ? origin : "https://runbits.io";
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": allowOrigin,
+          "Access-Control-Allow-Methods": "GET, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type",
+          "Access-Control-Max-Age": "3600",
+        },
+      });
+    }
     if (request.method === "GET" && url.pathname === "/api/monitoring/health-snapshot") {
       const check = await checkAll();
       const services = SERVICES.map((svc) => {
@@ -942,9 +960,18 @@ export default {
           latency_ms: r?.latency ?? 0,
         };
       });
+      const origin = request.headers.get("Origin") || "";
+      const allowed = ["https://runbits.io", "https://runbits.app", "http://localhost:3000"];
+      const allowOrigin = allowed.includes(origin) ? origin : "*";
       return new Response(
         JSON.stringify({ ts: check.ts, services }),
-        { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } },
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "Cache-Control": "no-store",
+            "Access-Control-Allow-Origin": allowOrigin,
+          },
+        },
       );
     }
 
