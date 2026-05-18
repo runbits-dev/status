@@ -22,6 +22,76 @@ crons = ["*/5 * * * *"]
 binding = "RUNTICS_CONTROL"
 service = "runtics-control"
 
+# ─── Health-check service bindings ──────────────────────────────────────────
+# Used by checkAll() in src/index.ts to ping each worker DIRECTLY via the
+# Cloudflare service binding mesh instead of fetching public URLs through
+# api.runbits.dev. Eliminates the cascade 522 bug where calling
+# /api/monitoring/health-snapshot through the gateway caused the gateway to
+# re-call status → status to call gateway 17× → loop → timeout.
+#
+# Pages projects (runbits.io, runbits.app) are NOT here because they aren't
+# Workers — they remain on plain `fetch(url)` in checkAll().
+
+[[services]]
+binding = "GATEWAY"
+service = "runbits-gateway"
+
+[[services]]
+binding = "AUTH_SERVICE"
+service = "runbits-auth"
+
+[[services]]
+binding = "BILLING_SERVICE"
+service = "runbits-billing"
+
+[[services]]
+binding = "PAYMENTS_SERVICE"
+service = "runbits-payments"
+
+[[services]]
+binding = "DOMAIN_SERVICE"
+service = "runbits-domain"
+
+[[services]]
+binding = "CORE_SERVICE"
+service = "runbits-core"
+
+[[services]]
+binding = "ORDER_SERVICE"
+service = "runbits-orders"
+
+[[services]]
+binding = "SOCIAL_SERVICE"
+service = "runbits-social"
+
+[[services]]
+binding = "DELIVERY_SERVICE"
+service = "runbits-delivery"
+
+[[services]]
+binding = "VERIFICATION_SERVICE"
+service = "runbits-verification"
+
+[[services]]
+binding = "NOTIFICATIONS_SERVICE"
+service = "runbits-notifications"
+
+[[services]]
+binding = "WHATSAPP_SERVICE"
+service = "runbits-whatsapp"
+
+[[services]]
+binding = "CHANNELS_SERVICE"
+service = "runbits-channels"
+
+[[services]]
+binding = "SALES_AGENT"
+service = "runbits-sales-agent"
+
+[[services]]
+binding = "MARKETING_SERVICE"
+service = "runbits-email-marketing"
+
 # Same Secrets Store secret runtics-control / runtics-agents-runtime use.
 # Required for the HMAC-signed self-alert call to /internal/alert-from-status.
 [[secrets_store_secrets]]

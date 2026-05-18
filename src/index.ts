@@ -42,7 +42,49 @@ interface Env {
   // Same secret as runtics-control's INTERNAL_SERVICE_SECRET. We use it to
   // HMAC-sign the self-alert call from this worker. Bound from Secrets Store.
   INTERNAL_SERVICE_SECRET?: { get: () => Promise<string> };
+  // ── Health-check service bindings ────────────────────────────────────────
+  // Direct worker-to-worker bindings used by checkAll() so the per-svc
+  // health probe never touches the public network (which previously caused
+  // gateway→status→gateway loops + cascade 522s). Pages (runbits.io,
+  // runbits.app) are NOT here because they're not Workers.
+  GATEWAY?: ServiceBindingLike;
+  AUTH_SERVICE?: ServiceBindingLike;
+  BILLING_SERVICE?: ServiceBindingLike;
+  PAYMENTS_SERVICE?: ServiceBindingLike;
+  DOMAIN_SERVICE?: ServiceBindingLike;
+  CORE_SERVICE?: ServiceBindingLike;
+  ORDER_SERVICE?: ServiceBindingLike;
+  SOCIAL_SERVICE?: ServiceBindingLike;
+  DELIVERY_SERVICE?: ServiceBindingLike;
+  VERIFICATION_SERVICE?: ServiceBindingLike;
+  NOTIFICATIONS_SERVICE?: ServiceBindingLike;
+  WHATSAPP_SERVICE?: ServiceBindingLike;
+  CHANNELS_SERVICE?: ServiceBindingLike;
+  SALES_AGENT?: ServiceBindingLike;
+  MARKETING_SERVICE?: ServiceBindingLike;
 }
+
+// Binding keys that point to Fetcher-style service bindings used by
+// checkAll() for direct worker-to-worker health probes. Narrow to the
+// subset of Env fields that are ServiceBindingLike so the lookup is
+// type-safe.
+type ServiceBindingKey =
+  | "GATEWAY"
+  | "AUTH_SERVICE"
+  | "BILLING_SERVICE"
+  | "PAYMENTS_SERVICE"
+  | "DOMAIN_SERVICE"
+  | "CORE_SERVICE"
+  | "ORDER_SERVICE"
+  | "SOCIAL_SERVICE"
+  | "DELIVERY_SERVICE"
+  | "VERIFICATION_SERVICE"
+  | "NOTIFICATIONS_SERVICE"
+  | "WHATSAPP_SERVICE"
+  | "CHANNELS_SERVICE"
+  | "SALES_AGENT"
+  | "RUNTICS_CONTROL"
+  | "MARKETING_SERVICE";
 
 // ─── Monitoring config (KV-backed runtime config) ────────────────────────────
 //
@@ -205,34 +247,47 @@ async function saveMonitoringConfig(env: Env, cfg: MonitoringConfig): Promise<Co
   return { ok: true, config: cfg };
 }
 
-const SERVICES = [
-  // Public surfaces (cliente-facing)
-  { id: "gateway", name: "API Gateway", url: "https://api.runbits.dev/health" },
+// A health check target. For internal Workers we prefer service bindings
+// (binding + path) — no public network, no risk of gateway→status→gateway
+// loops. For Pages projects (runbits.io, runbits.app) and other URL-only
+// targets we keep `url` as a fallback.
+type ServiceCheck = {
+  id: string;
+  name: string;
+  binding?: ServiceBindingKey;
+  url?: string;
+  path?: string;
+};
+
+const SERVICES: ServiceCheck[] = [
+  // Public surfaces (cliente-facing). API Gateway is itself a Worker so it
+  // gets the GATEWAY binding; runbits.io / runbits.app are Cloudflare Pages
+  // (no service binding available) so they stay on `url`.
+  { id: "gateway", name: "API Gateway", binding: "GATEWAY", path: "/health" },
   { id: "web", name: "Dashboard (runbits.io)", url: "https://runbits.io" },
   { id: "app", name: "Marketplace (runbits.app)", url: "https://runbits.app" },
 
-  // Internal microservices via gateway aggregated /health/svc/{id} endpoint
-  // (gateway forwards to each worker via service binding, no auth required).
-  { id: "auth", name: "Auth Service", url: "https://api.runbits.dev/health/svc/auth" },
-  { id: "billing", name: "Billing Service", url: "https://api.runbits.dev/health/svc/billing" },
-  { id: "payments", name: "Payments Service", url: "https://api.runbits.dev/health/svc/payments" },
-  { id: "domain", name: "Domain Service", url: "https://api.runbits.dev/health/svc/domain" },
-  { id: "core", name: "Core (Restaurants/Catalog)", url: "https://api.runbits.dev/health/svc/core" },
-  { id: "orders", name: "Orders Service", url: "https://api.runbits.dev/health/svc/orders" },
-  { id: "social", name: "Social Service", url: "https://api.runbits.dev/health/svc/social" },
-  { id: "delivery", name: "Delivery Service", url: "https://api.runbits.dev/health/svc/delivery" },
-  { id: "verification", name: "Verification (KYC)", url: "https://api.runbits.dev/health/svc/verification" },
-  { id: "notifications", name: "Notifications Service", url: "https://api.runbits.dev/health/svc/notifications" },
-  { id: "whatsapp", name: "WhatsApp Bot", url: "https://api.runbits.dev/health/svc/whatsapp" },
-  // Added 2026-05: channels (omnichannel inbox), runtics (AI agent), and
-  // catalog/sales aliases that the gateway resolves to RESTAURANT_SERVICE
-  // and SALES_AGENT bindings respectively. Email-marketing wired via
-  // MARKETING_SERVICE binding on the gateway.
-  { id: "channels", name: "Channels (omnichannel)", url: "https://api.runbits.dev/health/svc/channels" },
-  { id: "runtics", name: "Runtics (AI Agent)", url: "https://api.runbits.dev/health/svc/runtics" },
-  { id: "sales", name: "Sales Agent (AI)", url: "https://api.runbits.dev/health/svc/sales" },
-  { id: "catalog", name: "Catalog Service", url: "https://api.runbits.dev/health/svc/catalog" },
-  { id: "marketing", name: "Email Marketing", url: "https://api.runbits.dev/health/svc/marketing" },
+  // Internal microservices via service bindings — direct worker-to-worker
+  // calls, no public fetch, no gateway hop.
+  { id: "auth", name: "Auth Service", binding: "AUTH_SERVICE", path: "/health" },
+  { id: "billing", name: "Billing Service", binding: "BILLING_SERVICE", path: "/health" },
+  { id: "payments", name: "Payments Service", binding: "PAYMENTS_SERVICE", path: "/health" },
+  { id: "domain", name: "Domain Service", binding: "DOMAIN_SERVICE", path: "/health" },
+  { id: "core", name: "Core (Restaurants/Catalog)", binding: "CORE_SERVICE", path: "/health" },
+  { id: "orders", name: "Orders Service", binding: "ORDER_SERVICE", path: "/health" },
+  { id: "social", name: "Social Service", binding: "SOCIAL_SERVICE", path: "/health" },
+  { id: "delivery", name: "Delivery Service", binding: "DELIVERY_SERVICE", path: "/health" },
+  { id: "verification", name: "Verification (KYC)", binding: "VERIFICATION_SERVICE", path: "/health" },
+  { id: "notifications", name: "Notifications Service", binding: "NOTIFICATIONS_SERVICE", path: "/health" },
+  { id: "whatsapp", name: "WhatsApp Bot", binding: "WHATSAPP_SERVICE", path: "/health" },
+  { id: "channels", name: "Channels (omnichannel)", binding: "CHANNELS_SERVICE", path: "/health" },
+  { id: "runtics", name: "Runtics (AI Agent)", binding: "RUNTICS_CONTROL", path: "/health" },
+  { id: "sales", name: "Sales Agent (AI)", binding: "SALES_AGENT", path: "/health" },
+  // `catalog` is an alias to the same core worker (the old gateway route
+  // /health/svc/catalog mapped to RESTAURANT_SERVICE). Keep both ids so the
+  // existing KV history doesn't lose its time series.
+  { id: "catalog", name: "Catalog Service", binding: "CORE_SERVICE", path: "/health" },
+  { id: "marketing", name: "Email Marketing", binding: "MARKETING_SERVICE", path: "/health" },
 ];
 
 type CheckResult = {
@@ -249,18 +304,51 @@ type FailedService = { id: string; name: string; status: number; error?: string 
 
 // ─── Health check logic ──────────────────────────────────────────────────────
 
-async function checkAll(): Promise<CheckResult> {
+async function checkService(
+  env: Env,
+  svc: ServiceCheck,
+): Promise<{ ok: boolean; status: number; latency: number }> {
+  const start = Date.now();
+  try {
+    let res: Response;
+    if (svc.binding) {
+      const fetcher = env[svc.binding];
+      if (!fetcher) {
+        // Binding not configured for this deploy — record as unreachable so
+        // we notice in the status page instead of silently dropping the row.
+        return { ok: false, status: 0, latency: Date.now() - start };
+      }
+      const path = svc.path ?? "/health";
+      // Hostname is irrelevant for service bindings; Cloudflare routes by
+      // the binding itself. We still need a valid absolute URL.
+      res = await fetcher.fetch(
+        new Request(`https://internal${path}`, { method: "GET" }),
+      );
+    } else if (svc.url) {
+      res = await fetch(svc.url, {
+        method: "GET",
+        redirect: "follow",
+        signal: AbortSignal.timeout(5000),
+      });
+    } else {
+      return { ok: false, status: 0, latency: Date.now() - start };
+    }
+    return {
+      ok: res.status === 200,
+      status: res.status,
+      latency: Date.now() - start,
+    };
+  } catch {
+    return { ok: false, status: 0, latency: Date.now() - start };
+  }
+}
+
+async function checkAll(env: Env): Promise<CheckResult> {
   const results: CheckResult["services"] = {};
   await Promise.all(
     SERVICES.map(async (svc) => {
-      const start = Date.now();
-      try {
-        const res = await fetch(svc.url, { method: "GET", redirect: "follow" });
-        results[svc.id] = { ok: res.status === 200, status: res.status, latency: Date.now() - start };
-      } catch {
-        results[svc.id] = { ok: false, status: 0, latency: Date.now() - start };
-      }
-    })
+      results[svc.id] = await checkService(env, svc);
+    }),
   );
   return { ts: Date.now(), services: results };
 }
@@ -949,7 +1037,7 @@ export default {
       });
     }
     if (request.method === "GET" && url.pathname === "/api/monitoring/health-snapshot") {
-      const check = await checkAll();
+      const check = await checkAll(env);
       const services = SERVICES.map((svc) => {
         const r = check.services[svc.id];
         return {
@@ -988,7 +1076,7 @@ export default {
     }
 
     const [liveCheck, days] = await Promise.all([
-      checkAll(),
+      checkAll(env),
       getLast90Days(env.KV),
     ]);
     return new Response(renderPage(days, liveCheck), {
@@ -1017,7 +1105,7 @@ export default {
     const minute = new Date(event.scheduledTime).getUTCMinutes();
     if (minute % config.status_cron.interval_minutes !== 0) return;
 
-    const check = await checkAll();
+    const check = await checkAll(env);
     await Promise.all([
       storeCheck(env.KV, check),
       runMonitoringAgent(env, check),
