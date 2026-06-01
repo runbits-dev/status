@@ -41,7 +41,7 @@ export const contracts: ContractDefinition[] = [
     method: 'GET',
     path: '/api/monitoring/health-snapshot',
     description: 'One-shot live health snapshot across all workers. Public (CORS allow-listed).',
-    auth: 'none',
+    auth: 'jwt-admin',
     response: {
       status: 200,
       schema: {
